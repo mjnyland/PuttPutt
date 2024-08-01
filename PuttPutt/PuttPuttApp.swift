@@ -8,10 +8,10 @@
 import SwiftUI
 
 @main
-struct PuttPuttApp: App {
+struct GolfARApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            HomeScreenView()
         }
     }
 }
