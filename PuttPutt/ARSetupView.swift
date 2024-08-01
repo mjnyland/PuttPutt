@@ -6,11 +6,11 @@ struct ARSetupView: View {
     @State private var viewModel = ARSetupViewModel()
     @State private var setupStep = 0
     @State private var debugMessage = "Tap to begin setup"
-    @Environment(\.dismiss) private var dismiss
+    @State private var isPoseDetectionActive = false
 
     var body: some View {
         ZStack {
-            ARViewContainer(viewModel: viewModel, debugMessage: $debugMessage, setupStep: $setupStep)
+            ARViewContainer(viewModel: viewModel, debugMessage: $debugMessage, setupStep: $setupStep, isPoseDetectionActive: $isPoseDetectionActive)
                 .edgesIgnoringSafeArea(.all)
 
             VStack {
@@ -22,27 +22,28 @@ struct ARSetupView: View {
 
                 Spacer()
 
-                switch setupStep {
-                case 0:
-                    instructionView(text: "Tap to select hole position")
-                case 1:
-                    instructionView(text: "Tap to select putting area")
-                case 2:
-                    instructionView(text: "Move to suggested camera position")
-                default:
-                    EmptyView()
-                }
-
-                if setupStep == 2 {
-                    Button("Finish Setup") {
-                        viewModel.lockSetup()
-                        dismiss()
+                if !isPoseDetectionActive {
+                    switch setupStep {
+                    case 0:
+                        instructionView(text: "Tap to select hole position")
+                    case 1:
+                        instructionView(text: "Tap to select putting area")
+                    case 2:
+                        instructionView(text: "Move to suggested camera position")
+                    default:
+                        EmptyView()
                     }
-                    .padding()
-                    .background(Color.green)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
-                    .padding(.bottom, 20)
+
+                    if setupStep == 2 {
+                        Button("Start Pose Detection") {
+                            startPoseDetection()
+                        }
+                        .padding()
+                        .background(Color.green)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                        .padding(.bottom, 20)
+                    }
                 }
             }
         }
@@ -68,5 +69,11 @@ struct ARSetupView: View {
             .foregroundColor(.white)
             .cornerRadius(10)
             .padding(.bottom, 20)
+    }
+
+    private func startPoseDetection() {
+        isPoseDetectionActive = true
+        setupStep = 3
+        debugMessage = "Pose detection starting..."
     }
 }

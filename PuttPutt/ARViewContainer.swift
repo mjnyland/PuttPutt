@@ -1,54 +1,69 @@
 import SwiftUI
 import RealityKit
 import ARKit
+import AVFoundation
+import Vision
 
 struct ARViewContainer: UIViewRepresentable {
     var viewModel: ARSetupViewModel
-    @Binding var debugMessage: String
     @Binding var setupStep: Int
+    @Binding var isPoseDetectionActive: Bool
     
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
         
-        // Configure ARKit session
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = [.horizontal]
         
-        // Run the session
         arView.session.run(configuration)
         
-        // Add a tap gesture recognizer to the AR view
         let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap))
         arView.addGestureRecognizer(tapGesture)
         
         return arView
     }
-    
+
     func updateUIView(_ uiView: ARView, context: Context) {
-        if let holePosition = viewModel.holePosition {
-            context.coordinator.placeMarker(at: holePosition, color: .red, in: uiView)
-        }
-        if let puttingPosition = viewModel.puttingPosition {
-            context.coordinator.placeMarker(at: puttingPosition, color: .green, in: uiView)
-        }
-        if setupStep == 2 {
-            context.coordinator.placeSuggestedCameraPosition(in: uiView)
-        }
+        context.coordinator.update(arView: uiView, setupStep: setupStep, isPoseDetectionActive: isPoseDetectionActive)
     }
     
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
     
-    class Coordinator: NSObject {
+    class Coordinator: NSObject, ARSessionDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
         var parent: ARViewContainer
         var holeMarker: ModelEntity?
         var puttingMarker: ModelEntity?
         var cameraMarker: ModelEntity?
+        var captureSession: AVCaptureSession?
+        var poseRequest: VNDetectHumanBodyPoseRequest?
+        var previewLayer: AVCaptureVideoPreviewLayer?
         
         init(_ parent: ARViewContainer) {
             self.parent = parent
             super.init()
+            self.poseRequest = VNDetectHumanBodyPoseRequest()
+        }
+        
+        func update(arView: ARView, setupStep: Int, isPoseDetectionActive: Bool) {
+            if isPoseDetectionActive && !(captureSession?.isRunning ?? false) {
+                startUltraWideCameraAndPoseDetection(in: arView)
+            } else {
+                switch setupStep {
+                case 1:
+                    if let holePosition = parent.viewModel.holePosition {
+                        placeMarker(at: holePosition, color: .red, in: arView)
+                    }
+                case 2:
+                    if let puttingPosition = parent.viewModel.puttingPosition {
+                        placeMarker(at: puttingPosition, color: .green, in: arView)
+                        placeSuggestedCameraPosition(in: arView)
+                    }
+                default:
+                    break
+                }
+            }
         }
         
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
@@ -60,16 +75,12 @@ struct ARViewContainer: UIViewRepresentable {
                 
                 if !self.parent.viewModel.isHoleSet {
                     self.parent.viewModel.setHolePosition(worldPosition)
-                    self.parent.debugMessage = "Hole position set"
                     placeMarker(at: worldPosition, color: .red, in: arView)
                 } else if !self.parent.viewModel.isPuttingPositionSet {
                     self.parent.viewModel.setPuttingPosition(worldPosition)
-                    self.parent.debugMessage = "Putting position set"
                     placeMarker(at: worldPosition, color: .green, in: arView)
                     placeSuggestedCameraPosition(in: arView)
                 }
-            } else {
-                self.parent.debugMessage = "Couldn't find a surface. Try again."
             }
         }
         
@@ -107,19 +118,16 @@ struct ARViewContainer: UIViewRepresentable {
             let perpendicular = simd_float3(-direction.z, 0, direction.x)
             
             let distance = simd_distance(holePosition, puttingPosition)
-            var cameraPosition = midpoint + perpendicular * (distance * 0.866) // sqrt(3)/2 for equilateral triangle
+            var cameraPosition = midpoint + perpendicular * (distance * 0.866)
             
-            // Set the camera height to 5.5 feet (about 1.68 meters)
             let eyeHeight: Float = 1.68
             cameraPosition.y = eyeHeight
             
-            // Create a floating sphere to represent the camera position
             let sphereRadius: Float = 0.1
             let sphereMesh = MeshResource.generateSphere(radius: sphereRadius)
             let material = SimpleMaterial(color: .blue, isMetallic: false)
             let sphereEntity = ModelEntity(mesh: sphereMesh, materials: [material])
             
-            // Position the sphere at eye level
             sphereEntity.position = cameraPosition
             
             let anchorEntity = AnchorEntity(world: cameraPosition)
@@ -133,6 +141,97 @@ struct ARViewContainer: UIViewRepresentable {
             cameraMarker = sphereEntity
             
             parent.viewModel.currentCameraPosition = simd_make_float4(cameraPosition, 1)
+        }
+        
+        func startUltraWideCameraAndPoseDetection(in arView: ARView) {
+            arView.session.pause()
+            arView.scene.anchors.removeAll()
+            
+            captureSession = AVCaptureSession()
+            guard let captureSession = captureSession,
+                  let ultraWideCamera = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) else {
+                return
+            }
+            
+            do {
+                let input = try AVCaptureDeviceInput(device: ultraWideCamera)
+                if captureSession.canAddInput(input) {
+                    captureSession.addInput(input)
+                }
+            } catch {
+                return
+            }
+            
+            let videoOutput = AVCaptureVideoDataOutput()
+            videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+            if captureSession.canAddOutput(videoOutput) {
+                captureSession.addOutput(videoOutput)
+            }
+            
+            DispatchQueue.main.async {
+                self.setupPreviewLayer(for: arView)
+                captureSession.startRunning()
+            }
+        }
+        
+        func setupPreviewLayer(for arView: ARView) {
+            guard let captureSession = captureSession else { return }
+            
+            let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
+            previewLayer.frame = arView.bounds
+            previewLayer.videoGravity = .resizeAspectFill
+            
+            arView.layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+            
+            arView.layer.addSublayer(previewLayer)
+            self.previewLayer = previewLayer
+        }
+        
+        func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            
+            let imageRequestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+            
+            do {
+                try imageRequestHandler.perform([poseRequest!])
+                if let observations = poseRequest?.results as? [VNHumanBodyPoseObservation] {
+                    DispatchQueue.main.async {
+                        self.processObservations(observations)
+                    }
+                }
+            } catch {
+                print("Failed to perform Vision request: \(error)")
+            }
+        }
+        
+        func processObservations(_ observations: [VNHumanBodyPoseObservation]) {
+            guard let observation = observations.first else { return }
+            
+            if let leftShoulder = try? observation.recognizedPoint(.leftShoulder),
+               let rightShoulder = try? observation.recognizedPoint(.rightShoulder),
+               let leftHip = try? observation.recognizedPoint(.leftHip),
+               let rightHip = try? observation.recognizedPoint(.rightHip) {
+                
+                let bodyAngle = calculateBodyAngle(leftShoulder, rightShoulder, leftHip, rightHip)
+                let stanceWidth = calculateStanceWidth(leftHip, rightHip)
+                
+                // Here you can use bodyAngle and stanceWidth as needed
+                // For example, update your viewModel or trigger some action
+            }
+        }
+        
+        func calculateBodyAngle(_ leftShoulder: VNRecognizedPoint, _ rightShoulder: VNRecognizedPoint,
+                                _ leftHip: VNRecognizedPoint, _ rightHip: VNRecognizedPoint) -> CGFloat {
+            let shoulderMidpoint = CGPoint(x: (leftShoulder.x + rightShoulder.x) / 2,
+                                           y: (leftShoulder.y + rightShoulder.y) / 2)
+            let hipMidpoint = CGPoint(x: (leftHip.x + rightHip.x) / 2,
+                                      y: (leftHip.y + rightHip.y) / 2)
+            
+            return atan2(shoulderMidpoint.y - hipMidpoint.y, shoulderMidpoint.x - hipMidpoint.x)
+        }
+        
+        func calculateStanceWidth(_ leftHip: VNRecognizedPoint, _ rightHip: VNRecognizedPoint) -> CGFloat {
+            return abs(leftHip.x - rightHip.x)
         }
     }
 }

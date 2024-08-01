@@ -11,7 +11,7 @@ import SwiftUI
 struct GolfARApp: App {
     var body: some Scene {
         WindowGroup {
-            HomeScreenView()
+            HomeScreenView ()
         }
     }
 }
